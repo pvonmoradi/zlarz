@@ -1,0 +1,11 @@
+[Unit]
+Description=earthquake-checker queries for latest seismic activities
+Requires=earthquake-checker.service
+
+[Timer]
+Unit=earthquake-checker.service
+OnCalendar=*:0/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

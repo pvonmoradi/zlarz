@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+#
+# Author: Pooya Moradi
+# Date : 1399-11-02 | 2021/01/21
+# License: MIT
+#
+# Description: A simple script which polls http://irsc.ut.ac.ir for latest
+#              seismic events depending on epicenter province or magnitude
+#
+# Dependencies: jq curl notify-send
+#               fq | xmlstarlet
+#
+# TODO there is a bug that events are shown more than once in cache mode
+
+version=0.32
+language="en"
+num_events=20 # max is 20
+notification_flag=0
+provinces="[]"
+min_magnitude="0"
+xmlstarlet_flag=0
+nonzero_exit_flag=0
+cache_mode_flag=0
+result=""
+my_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/zlarz"
+old_feed="$my_cache_dir/events_list.json"
+feeder_link_en="http://irsc.ut.ac.ir/events_list.xml"
+feeder_link_fa="http://irsc.ut.ac.ir/events_list_fa.xml"
+
+show_help() {
+    cat << EOF
+Usage: zlarz [-p provinces] [-m min_magnitude] [-l language]
+             [-k max_events] [-o output_file]
+             [-n] [-c] [-e] [-x] [-V] [-h]
+DESCRIPTION
+    zlarz: query for latest earthquake events in Iran, apply filters
+    and present the results
+
+OPTIONS
+     [-p provinces]
+        Provinces of interest at which the event occured (with any magnitude)
+        Format: comma-separated list, e.g. "Gilan, Ghazvin"
+     [-m min_magnitude]
+        Minimum magnitude of the event in Richter scale (in any province)
+        Range: m[float] >= 0
+     [-l language]
+        Language of output
+        Available: "en", "fa"
+     [-k max_events]
+        Maximum number of matching events
+        Range: m[int] >= 0
+     [-n]
+        Enable presentation as notification (via notify-send)
+     [-o output_file]
+        Path of output file to save raw json feed e.g. /tmp/latest_feed.json
+        WARNING: output_file would get mutated!
+     [-c]
+        Only process events that are not already in the cache file, then update
+        the cache file
+     [-e]
+        Returns with exit code 3 if there are no matching events
+        Note: This mode is useful for caller scripts
+     [-x]
+        Legacy mode, use xmlstarlet instead of fq and jq
+        Note: In this mode, only -k switch has an effect
+     [-V]
+        Display the script version
+     [-h]
+        Display the help message
+
+
+NOTES
+    - -p and -m switches are applied independently, then ORed. So -p "Gilan" -m
+      5 would get all events in Gilan (with any magnitude) + all events with
+      mag>=5 (in any province). In other words, this script does NOT support
+      getting for example >=5 Richter events only in Gilan.
+
+EXAMPLES
+    # get all events with >=0 magnitude (in any province)
+    zlarz -m 0
+
+    # get all events with magnitudes >= 3.7 (in any province), farsi language,
+    # with notification
+    zlarz -m 3.7 -l fa -n
+
+    # get last 2 events in Gilan (with any magnitude) also save the unfiltered
+    # feed to an output file
+    zlarz -p "Gilan" -k 2 -o /tmp/feed.json
+
+    # get all events in Gilan or Ghazvin or Zanjan (with any magnitude) PLUS all
+    # events with magnitude >= 3.5 (in any province)
+    zlarz -p "Gilan,Zanjan,Ghazvin" -m 3.5
+
+    # get all NEW events that {occured in Gilan with any magnitude PLUS occured
+    # anywhere with magnitude >=5 Richter}, update the cache file, use farsi,
+    # use notification
+    zlarz -p "Gilan" -m 5 -c -l fa -n
+EOF
+}
+
+notify() {
+    notify-send -i earthquake "$@"
+}
+
+generate_units_str() {
+    case "$language" in
+        "en")
+            earthquake_str="Earthquake"
+            depth_str="in depth"
+            magnitude_unit="Richter"
+            distance_unit="km"
+            ;;
+        "fa")
+            earthquake_str="زلزله"
+            depth_str="در عمق"
+            magnitude_unit="ریشتر"
+            distance_unit="کیلومتری"
+            ;;
+        *)
+            printf >&2 "[ERROR] Unsupported language! Acceptable values: en|fa\n"
+            return 2
+            ;;
+    esac
+}
+
+get_feed() {
+    local feed
+    local msg
+    case "$1" in
+        "en")
+            if ! feed=$(curl -sSf --max-time 60 "$feeder_link_en"); then
+                msg="[ERROR] Problem in fetching $feeder_link_en"
+                printf >&2 "%s\n" "$msg"
+                return 1
+            fi
+            ;;
+        "fa")
+            if ! feed=$(curl -sSf --max-time 60 "$feeder_link_fa"); then
+                msg="[ERROR] Problem in fetching $feeder_link_fa"
+                printf >&2 "%s\n" "$msg"
+                return 1
+            fi
+            ;;
+        *)
+            printf >&2 "[ERROR] Bad usage!\n"
+            return 2
+            ;;
+    esac
+    printf "%s\n" "$feed"
+}
+
+recent_events_xmlstarlet() {
+    local latest_feed
+    local msg
+    if ! latest_feed=$(get_feed "$language"); then
+        msg="Error in fetching http://irsc.ut.ac.ir/events_list.xml"
+        printf >&2 "%s\n" "$msg"
+        if ((notification_flag)); then
+            notify "earthquake" "$msg"
+        fi
+        return 1
+    fi
+    # ignoring the first item element since it is licence terms
+    for ((i = 2; i <= num_events + 1; i++)); do
+        declare -A event_data
+        local filtered_str
+        if ! filtered_str=$(xmlstarlet select \
+            --template --match "//items/item[$i]//*" \
+            --value-of "name()" --output " " --value-of "text()" --nl \
+            <<< "$latest_feed"); then
+            msg="[ERROR] Failed to parse remote 'events_list.xml'"
+            printf >&2 "%s\n" "$msg"
+            if ((notification_flag)); then
+                notify "earthquake" "$msg"
+            fi
+            return 1
+        fi
+        while IFS=' ' read -r key value; do
+            event_data["$key"]="$value"
+        done <<< "$filtered_str"
+        local reg1 dis1 reg2 dis2 reg3 dis3 magnitude depth event_data
+        local info_header_str info_main_str
+        reg1=${event_data[reg1]}
+        dis1=${event_data[dis1]}
+        reg2=${event_data[reg2]}
+        dis2=${event_data[dis2]}
+        reg3=${event_data[reg3]}
+        dis3=${event_data[dis3]}
+        magnitude=${event_data[mag]}
+        depth=${event_data[dep]}
+        event_date=${event_data[date]}
+
+        info_header_str=$(
+            printf '%s!\n%s %s %s %s %s' \
+                "$earthquake_str" \
+                "$magnitude" "$magnitude_unit" \
+                "$depth_str" "$depth" "$distance_unit"
+        )
+        info_main_str=$(
+            printf '%s %s %s\n%s %s %s\n%s %s %s\n%s' \
+                "$reg1" "$dis1" "$distance_unit" \
+                "$reg2" "$dis2" "$distance_unit" \
+                "$reg3" "$dis3" "$distance_unit" \
+                "$event_date"
+        )
+        printf "%s\n%s\n----------\n" "$info_header_str" "$info_main_str"
+        if ((notification_flag)); then
+            notify "$info_header_str" "$info_main_str"
+        fi
+    done
+    return 0
+}
+
+xml2json() {
+    if ! fq --option 'color=false' --compact-output <<< "$1"; then
+        printf >&2 "[ERROR] Problem in converting from xml to json.\n"
+        return 1
+    fi
+}
+
+process() {
+    local feed_en feed_fa feed_req
+    local filter
+    local element reg1 dis1 reg2 dis2 reg3 dis3 magnitude depth event_data
+    local info_header_str info_main_str
+    local count="$num_events"
+
+    # filtering should be done on English feed so it must always be downloaded
+    feed_en=$(get_feed "en") || return 1
+    feed_en=$(xml2json "$feed_en") || return 1
+
+    # fill up feed_req, only download Persian feed if it is requested
+    if [[ "$language" == "fa" ]]; then
+        feed_fa=$(get_feed "fa") || return 1
+        feed_fa=$(xml2json "$feed_fa") || return 1
+        feed_req="$feed_fa"
+    else
+        feed_req="$feed_en"
+    fi
+
+    if [[ -n "$output_file" ]]; then
+        if ! jq . <<< "$feed_req" > "$output_file"; then
+            printf >&2 "[ERROR] Problem in writing feed json to %s \n" \
+                "$output_file"
+            return 1
+        fi
+    fi
+
+    # shellcheck disable=2016
+    filter='''
+            if ($cache_mode == 1) then
+                ($current.items.item[1:] - $old[0].items.item[1:])
+            else
+                $current.items.item[1:]
+            end
+            | .[]
+            | select(
+                if ($provinces | length > 0) then
+                    ((.reg1 + "-" + .reg2 + "-" + .reg3 + "-")
+                    | ascii_downcase | contains($provinces[]))
+                else false end
+                or
+                if ($min_mag | type == "number") then
+                    (.mag | tonumber >= $min_mag)
+                else false end
+            ).id
+            '''
+
+    jq --raw-output --compact-output --null-input \
+        --slurpfile old "$old_feed" --argjson current "$feed_en" \
+        --argjson provinces "$provinces" --argjson min_mag "$min_magnitude" \
+        --argjson cache_mode "$cache_mode_flag" \
+        "$filter" \
+        | while read -r id; do
+            ((count-- <= 0)) && break
+
+            element=$(jq --arg id "$id" '.items.item[] | select(.id == $id)' \
+                <<< "$feed_req")
+            { read -r reg1 && read -r reg2 && read -r reg3 \
+                && read -r dis1 && read -r dis2 && read -r dis3 \
+                && read -r magnitude && read -r depth && read -r event_date; } \
+                < <(jq -r '.reg1, .reg2, .reg3, .dis1, .dis2, .dis3,
+                            .mag, .dep, .date' \
+                    <<< "$element")
+            info_header_str=$(
+                printf '%s!\n%s %s %s %s %s' \
+                    "$earthquake_str" \
+                    "$magnitude" "$magnitude_unit" \
+                    "$depth_str" "$depth" "$distance_unit"
+            )
+            info_main_str=$(
+                printf '%s %s %s\n%s %s %s\n%s %s %s\n%s' \
+                    "$reg1" "$dis1" "$distance_unit" \
+                    "$reg2" "$dis2" "$distance_unit" \
+                    "$reg3" "$dis3" "$distance_unit" \
+                    "$event_date"
+            )
+            printf "%s\n%s\n----------\n" "$info_header_str" "$info_main_str"
+            if ((notification_flag)); then
+                notify "$info_header_str" "$info_main_str"
+            fi
+        done
+
+    # update the state-file (events_list.json)
+    ((cache_mode_flag)) && printf "%s" "$feed_en" > "$old_feed"
+    return 0
+}
+
+while getopts l:p:m:k:o:cxneVh opt; do
+    case $opt in
+        h)
+            show_help
+            exit 0
+            ;;
+        V)
+            printf "%s\n" "$version"
+            exit 0
+            ;;
+        l)
+            language="$OPTARG"
+            ;;
+        p)
+            if ! provinces=$(jq --raw-input \
+                '[split(",") []
+                            | sub("^ *";"") | sub(" *$";"-")
+                            | ascii_downcase]' \
+                <<< "$OPTARG"); then
+                printf >&2 "[ERROR] Problem in forming up provinces json array."
+                exit 2
+            fi
+            ;;
+        m)
+            min_magnitude="$OPTARG"
+            if ! jq --exit-status --null-input \
+                "($min_magnitude | type) == \"number\"" &> /dev/null; then
+                printf >&2 "[ERROR] Minimum magnitude should be a number.\n"
+                exit 2
+            fi
+            ;;
+        k)
+            num_events="$OPTARG"
+            case $num_events in
+                *[!0123456789]*)
+                    printf >&2 "[ERROR] Max events should be an integer.\n"
+                    exit 2
+                    ;;
+            esac
+            ;;
+        n)
+            notification_flag=1
+            ;;
+        c)
+            cache_mode_flag=1
+            ;;
+        x)
+            xmlstarlet_flag=1
+            ;;
+        o)
+            output_file="$OPTARG"
+            ;;
+        e)
+            nonzero_exit_flag=1
+            ;;
+        *)
+            printf >&2 "[ERROR] Bad usage! Check help (-h)\n"
+            exit 2
+            ;;
+    esac
+done
+shift "$((OPTIND - 1))"
+
+# create the cache file if none exists
+if [[ ! -e "$old_feed" ]]; then
+    mkdir --parents "$my_cache_dir"
+    printf '{"items":{"item":[]}}\n' > "$old_feed"
+fi
+
+generate_units_str || exit
+
+if ((xmlstarlet_flag)); then
+    # xmlstarlet method, legacy mode
+    if ((cache_mode_flag)) || [[ -n "$output_file" ]]; then
+        printf >&2 "[ERROR] Bad usage! Unsupported switches in -x mode. \
+Check help (-h)\n"
+        exit 1
+    fi
+    if [[ "$min_magnitude" != "0" ]] || [[ "$provinces" != "[]" ]]; then
+        printf >&2 "[WARN] Ignoring -m and -p in -x mode\n"
+    fi
+    if ! result=$(recent_events_xmlstarlet); then
+        exit 1
+    fi
+else
+    # fq jq method, default mode
+    if ! result=$(process); then
+        exit 1
+    fi
+fi
+
+if [[ -n "$result" ]]; then
+    printf "%s\n" "$result"
+else
+    if ((nonzero_exit_flag)); then
+        exit 3
+    fi
+fi

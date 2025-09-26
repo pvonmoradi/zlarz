@@ -1,0 +1,7 @@
+[Unit]
+Description=earthquake-checker queries for latest seismic activities
+
+[Service]
+Type=oneshot
+Environment=DISPLAY=:0
+ExecStart=/home/username/bin/earthquake-checker

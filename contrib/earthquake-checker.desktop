@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=zlarz-check
+Exec=sh -c "/home/$USER/bin/zlarz -l fa -k 4 -n >/dev/null"
+Type=Application
+Terminal=false
+Categories=Utility;
