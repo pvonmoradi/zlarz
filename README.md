@@ -3,6 +3,12 @@ A simple bash client for [http://irsc.ut.ac.ir](http://irsc.ut.ac.ir) to fetch
 latest Iranian seismic events for a list of provinces or those above a minimum
 magnitude.
 
+<p align="middle">
+  <img align="middle" height="180" src="docs/zlarz-dunst-en.jpg">
+  <img align="middle" height="180" src="docs/zlarz-dunst-fa.jpg">
+</p>
+
+
 ## Dependencies
 - `curl jq fq notify-send`
 - `xmlstarlet` : (legacy)
