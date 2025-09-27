@@ -12,7 +12,8 @@
 #
 # TODO there is a bug that events are shown more than once in cache mode
 
-version=0.32
+version=0.33
+user_agent="zlarz-v$version"
 language="en"
 num_events=20 # max is 20
 notification_flag=0
@@ -128,14 +129,16 @@ get_feed() {
     local msg
     case "$1" in
         "en")
-            if ! feed=$(curl -sSf --max-time 60 "$feeder_link_en"); then
+            if ! feed=$(curl -sSf --max-time 60 -A "$user_agent" \
+                             "$feeder_link_en"); then
                 msg="[ERROR] Problem in fetching $feeder_link_en"
                 printf >&2 "%s\n" "$msg"
                 return 1
             fi
             ;;
         "fa")
-            if ! feed=$(curl -sSf --max-time 60 "$feeder_link_fa"); then
+            if ! feed=$(curl -sSf --max-time 60 -A "$user_agent" \
+                             "$feeder_link_fa"); then
                 msg="[ERROR] Problem in fetching $feeder_link_fa"
                 printf >&2 "%s\n" "$msg"
                 return 1
